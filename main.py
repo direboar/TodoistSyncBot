@@ -1,4 +1,5 @@
 import os
+import time
 import json
 import requests
 from datetime import datetime
@@ -18,9 +19,6 @@ class ScheduleItem(BaseModel):
 
 class ScheduleList(BaseModel):
     items: list[ScheduleItem] = Field(description="抽出されたスケジュールのリスト")
-
-class ChannelFilterResult(BaseModel):
-    is_target: bool = Field(description="現在月または翌月に該当するチャンネル名であれば true")
 
 # -------------------------------------------------------------
 # 2. Main Logic
@@ -65,32 +63,33 @@ def get_messages(channel_id: str, after_id: str, headers: dict) -> list:
     messages.reverse()
     return messages
 
-def is_target_channel(channel_name: str, gemini_client: genai.Client) -> bool:
-    """Geminiを使ってチャンネル名が現在月または翌月に該当するか判定する"""
-    now = datetime.now()
-    prompt = f"""
-    現在の日付は {now.year}年{now.month}月 です。
-    チャンネル名「{channel_name}」が、現在月（{now.year}年{now.month}月）または翌月のスケジュールを指すものであるか判定してください。
-    年が省略されている場合は今年の月とみなして構いません。
-    該当する場合は true、そうでない場合（過去の月や、まったく関係のない名前）は false を返してください。
-    """
-    try:
-        response = gemini_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config={
-                'response_mime_type': 'application/json',
-                'response_schema': ChannelFilterResult,
-                'temperature': 0.1
-            }
-        )
-        result: ChannelFilterResult = response.parsed
-        return result.is_target
-    except Exception as e:
-        print(f"Error evaluating channel name '{channel_name}': {e}")
-        return False
+import re
+from dateutil.relativedelta import relativedelta
 
-def parse_message_to_schedules(message_content: str, gemini_client: genai.Client) -> list[ScheduleItem]:
+def is_target_channel(channel_name: str) -> bool:
+    """正規表現を使ってチャンネル名が現在月または翌月に該当するか判定する"""
+    now = datetime.now()
+    next_month = now + relativedelta(months=1)
+    
+    # ターゲットとなる年月のリスト（今月と来月）
+    target_dates = [(now.year, now.month), (next_month.year, next_month.month)]
+    
+    for year, month in target_dates:
+        # 正規表現パターンを作成
+        # 例：(2026|令和8|26) \s* 年 \s* 4 \s* 月
+        # 年が省略されているケース (例: 4月) にも対応
+        short_year = str(year)[-2:]
+        # 簡易的な和暦変換 (令和 = 西暦 - 2018)
+        reiwa_year = year - 2018
+        
+        pattern = fr"(?:(?:{year}|令和{reiwa_year}|{short_year})\s*年\s*)?{month}\s*月"
+        
+        if re.search(pattern, channel_name):
+            return True
+            
+    return False
+
+def parse_message_to_schedules(message_content: str, gemini_client: genai.Client) -> list[ScheduleItem] | None:
     """Geminiを使ってメッセージ本文からスケジュールを抽出する"""
     prompt = f"""
     以下のテキストからスケジュール情報を抽出し、指定した構造化JSONで返してください。
@@ -99,21 +98,29 @@ def parse_message_to_schedules(message_content: str, gemini_client: genai.Client
     テキスト:
     {message_content}
     """
-    try:
-        response = gemini_client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config={
-                'response_mime_type': 'application/json',
-                'response_schema': ScheduleList,
-                'temperature': 0.1
-            }
-        )
-        result: ScheduleList = response.parsed
-        return result.items
-    except Exception as e:
-        print(f"Error parsing message: {e}")
-        return []
+    for attempt in range(3):
+        try:
+            response = gemini_client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config={
+                    'response_mime_type': 'application/json',
+                    'response_schema': ScheduleList,
+                    'temperature': 0.1
+                }
+            )
+            result: ScheduleList = response.parsed
+            return result.items
+        except Exception as e:
+            if "429" in str(e) or "Quota" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                print(f"Rate limit exceeded (429). Retrying in 10 seconds... (Attempt {attempt + 1}/3)")
+                time.sleep(10)
+            else:
+                print(f"Error parsing message: {e}")
+                return []
+                
+    print("Failed to parse message after 3 attempts due to API rate limits.")
+    return None
 
 def main():
     load_dotenv()
@@ -168,10 +175,10 @@ def main():
             if c["type"] == 0 and c.get("parent_id") in category_ids
         ]
 
-        # 3. チャンネル名が今月・来月かGeminiで判定
+        # 3. チャンネル名が今月・来月か判別
         target_channel_ids = []
         for ch in text_channels:
-            if is_target_channel(ch["name"], gemini_client):
+            if is_target_channel(ch["name"]):
                 target_channel_ids.append(ch["id"])
                 print(f"Target channel found: {ch['name']} (ID: {ch['id']})")
             else:
@@ -193,19 +200,25 @@ def main():
             print(f"Fetched {len(messages)} new messages from channel {channel_id}.")
 
             max_msg_id = last_message_id
+            api_exhausted = False
             for msg in messages:
                 msg_id = msg["id"]
                 content = msg.get("content", "")
                 
-                # Update max_msg_id to keep track of the latest processed message
-                if not max_msg_id or int(msg_id) > int(max_msg_id):
-                    max_msg_id = msg_id
-
                 if not content.strip():
+                    if not max_msg_id or int(msg_id) > int(max_msg_id):
+                        max_msg_id = msg_id
                     continue
 
                 # Geminiで解析
                 schedules = parse_message_to_schedules(content, gemini_client)
+                
+                # APIコールが完全に失敗した場合（Quota Errorなどで復帰不可だった場合）はそこで中断する
+                if schedules is None:
+                    print(f"Skipping further messages in channel {channel_id} due to API exhaustion.")
+                    api_exhausted = True
+                    break
+
                 for schedule in schedules:
                     # Todoistタスク作成
                     # Task content e.g., "FN8(XXX区民館)"
@@ -233,9 +246,21 @@ def main():
                     except Exception as e:
                         print(f"Error creating Todoist task: {e}")
 
+                # 本文解析とTodoist登録の行程が全て正常終了した時のみ既読ステータスを更新する
+                if not max_msg_id or int(msg_id) > int(max_msg_id):
+                    max_msg_id = msg_id
+
+                # Gemini APIの無料枠制限（15RPM等）を回避するため、解析1件ごとに5秒待機する
+                time.sleep(5)
+
             # 状態更新
-            state[channel_id] = max_msg_id
-            save_state(state)
+            if max_msg_id and max_msg_id != state.get(channel_id):
+                state[channel_id] = max_msg_id
+                save_state(state)
+                
+            if api_exhausted:
+                print("API quota exhausted. Stopping further processing completely.")
+                break
 
 if __name__ == "__main__":
     main()
