@@ -1,0 +1,19 @@
+# 認証情報・環境変数
+.env
+
+# 仮想環境
+.venv
+venv/
+env/
+
+# Python中間ファイル
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# エディタ・OSの一時ファイル
+.vscode/
+.idea/
+.DS_Store
+*.log

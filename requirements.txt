@@ -1,0 +1,4 @@
+google-genai
+todoist-api-python
+requests
+python-dotenv
