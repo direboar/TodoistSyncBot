@@ -74,19 +74,26 @@ def is_target_channel(channel_name: str) -> bool:
     # ターゲットとなる年月のリスト（今月と来月）
     target_dates = [(now.year, now.month), (next_month.year, next_month.month)]
     
-    for year, month in target_dates:
-        # 正規表現パターンを作成
-        # 例：(2026|令和8|26) \s* 年 \s* 4 \s* 月
-        # 年が省略されているケース (例: 4月) にも対応
-        short_year = str(year)[-2:]
-        # 簡易的な和暦変換 (令和 = 西暦 - 2018)
-        reiwa_year = year - 2018
+    # チャンネル名から考えられる "(年)月" の表記を全て抽出
+    # (年)部分をオプショナルではなく必須のグループとして扱うパターンに変更
+    matches = re.finditer(r'(20\d{2}|令和\d+|\d{2})\s*年\s*(\d+)\s*月', channel_name)
+    
+    for match in matches:
+        year_str = match.group(1)
+        month_str = match.group(2)
+        month_val = int(month_str)
         
-        pattern = fr"(?:(?:{year}|令和{reiwa_year}|{short_year})\s*年\s*)?{month}\s*月"
-        
-        if re.search(pattern, channel_name):
-            return True
+        for tgt_year, tgt_month in target_dates:
+            if month_val != tgt_month:
+                continue
+                
+            # 年が指定されている場合、それがターゲットの年と一致するか確認
+            tgt_short = str(tgt_year)[-2:]
+            tgt_reiwa = f"令和{tgt_year - 2018}"
             
+            if year_str in (str(tgt_year), tgt_short, tgt_reiwa):
+                return True
+                
     return False
 
 def parse_message_to_schedules(message_content: str, gemini_client: genai.Client) -> list[ScheduleItem] | None:
