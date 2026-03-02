@@ -5,7 +5,7 @@ import requests
 from datetime import datetime
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
-from google import genai
+from openai import OpenAI
 from todoist_api_python.api import TodoistAPI
 
 # -------------------------------------------------------------
@@ -96,30 +96,31 @@ def is_target_channel(channel_name: str) -> bool:
                 
     return False
 
-def parse_message_to_schedules(message_content: str, gemini_client: genai.Client) -> list[ScheduleItem] | None:
-    """Geminiを使ってメッセージ本文からスケジュールを抽出する"""
-    prompt = f"""
-    以下のテキストからスケジュール情報を抽出し、指定した構造化JSONで返してください。
-    複数のスケジュールが含まれている場合は全て抽出してください。
+def parse_message_to_schedules(message_content: str, ai_client: OpenAI) -> list[ScheduleItem] | None:
+    """GitHub Models (gpt-4o-mini)を使ってメッセージ本文からスケジュールを抽出する"""
+    prompt_system = "以下のテキストからスケジュール情報を抽出し、指定した構造化JSONで返してください。複数のスケジュールが含まれている場合は全て抽出してください。予定がない場合は空のリストを返してください。"
+    prompt_user = f"テキスト:\n{message_content}"
     
-    テキスト:
-    {message_content}
-    """
     for attempt in range(3):
         try:
-            response = gemini_client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=prompt,
-                config={
-                    'response_mime_type': 'application/json',
-                    'response_schema': ScheduleList,
-                    'temperature': 0.1
-                }
+            response = ai_client.beta.chat.completions.parse(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": prompt_system},
+                    {"role": "user", "content": prompt_user}
+                ],
+                response_format=ScheduleList,
+                temperature=0.1
             )
-            result: ScheduleList = response.parsed
+            
+            result: ScheduleList = response.choices[0].message.parsed
+            if result is None:
+                return []
             return result.items
+            
         except Exception as e:
-            if "429" in str(e) or "Quota" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+            error_msg = str(e).lower()
+            if "429" in error_msg or "rate limit" in error_msg or "quota" in error_msg:
                 print(f"Rate limit exceeded (429). Retrying in 10 seconds... (Attempt {attempt + 1}/3)")
                 time.sleep(10)
             else:
@@ -134,19 +135,24 @@ def main():
     
     discord_token = os.getenv("DISCORD_BOT_TOKEN")
     todoist_token = os.getenv("TODOIST_API_TOKEN")
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    github_models_token = os.getenv("GH_MODELS_TOKEN")
     category_prefix = os.getenv("TARGET_CATEGORY_PREFIX", "公民館予約")
     project_id = os.getenv("TODOIST_PROJECT_ID", "")
     event_prefix = os.getenv("EVENT_TITLE_PREFIX", "FN8")
 
-    if not discord_token or not todoist_token or not gemini_key:
+    if not discord_token or not todoist_token or not github_models_token:
         print("Required environment variables are missing.")
         return
 
     # Initialize clients
     discord_headers = get_discord_headers(discord_token)
     todoist_client = TodoistAPI(todoist_token)
-    gemini_client = genai.Client(api_key=gemini_key)
+    
+    # Initialize GitHub Models client (OpenAI SDK)
+    ai_client = OpenAI(
+        base_url="https://models.inference.ai.azure.com",
+        api_key=github_models_token
+    )
 
     state = load_state()
     
@@ -217,8 +223,8 @@ def main():
                         max_msg_id = msg_id
                     continue
 
-                # Geminiで解析
-                schedules = parse_message_to_schedules(content, gemini_client)
+                # GitHub Models(gpt-4o-mini)で解析
+                schedules = parse_message_to_schedules(content, ai_client)
                 
                 # APIコールが完全に失敗した場合（Quota Errorなどで復帰不可だった場合）はそこで中断する
                 if schedules is None:
@@ -257,7 +263,7 @@ def main():
                 if not max_msg_id or int(msg_id) > int(max_msg_id):
                     max_msg_id = msg_id
 
-                # Gemini APIの無料枠制限（15RPM等）を回避するため、解析1件ごとに5秒待機する
+                # APIの無料枠制限を回避するため、解析1件ごとに待機する (GitHub Modelsも15 RPM上限あり)
                 time.sleep(5)
 
             # 状態更新
