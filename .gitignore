@@ -1,5 +1,6 @@
 # 認証情報・環境変数
 .env
+state.json
 
 # 仮想環境
 .venv
