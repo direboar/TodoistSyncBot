@@ -141,7 +141,11 @@ def main():
     event_prefix = os.getenv("EVENT_TITLE_PREFIX", "FN8")
 
     if not discord_token or not todoist_token or not github_models_token:
-        print("Required environment variables are missing.")
+        missing = []
+        if not discord_token: missing.append("DISCORD_BOT_TOKEN")
+        if not todoist_token: missing.append("TODOIST_API_TOKEN")
+        if not github_models_token: missing.append("GH_MODELS_TOKEN")
+        print(f"Required environment variables are missing: {', '.join(missing)}")
         return
 
     # Initialize clients
