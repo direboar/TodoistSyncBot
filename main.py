@@ -98,7 +98,14 @@ def is_target_channel(channel_name: str) -> bool:
 
 def parse_message_to_schedules(message_content: str, ai_client: OpenAI) -> list[ScheduleItem] | None:
     """GitHub Models (gpt-4o-mini)を使ってメッセージ本文からスケジュールを抽出する"""
-    prompt_system = "以下のテキストからスケジュール情報を抽出し、指定した構造化JSONで返してください。複数のスケジュールが含まれている場合は全て抽出してください。予定がない場合は空のリストを返してください。"
+    now = datetime.now()
+    prompt_system = (
+        f"現在の日時は {now.strftime('%Y年%m月%d日')} です。\n"
+        "以下のテキストからスケジュール情報を抽出し、指定した構造化JSONで返してください。\n"
+        "和暦（令和X年）が含まれる場合は、西暦（2018 + X 年）に変換してYYYY形式にしてください（例: 令和8年 -> 2026）。\n"
+        "年が省略されている場合は、現在の日時を基準に適切な年を補完してください。\n"
+        "複数のスケジュールが含まれている場合は全て抽出してください。予定がない場合は空のリストを返してください。"
+    )
     prompt_user = f"テキスト:\n{message_content}"
     
     for attempt in range(3):
